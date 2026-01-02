@@ -3148,55 +3148,105 @@ def format_date_with_parentheses(date_string):
 def get_foley_lines(driver: webdriver.Edge, original_window_handle: str, wait_timeout: int) -> str:
     """
     爬取表格數據，篩選處置名稱/別名中的管路關鍵字，並彙整成計數的字串 (e.g., CVC*2)。
-    優先匹配較長的/更具體的管路名稱，並將最終結果標準化。
+    修正版：增強視窗管理，自動關閉多餘彈窗。
     """
     
-    print("\n--- 階段一: 一次開啟所有視窗並執行搜尋 ---")
-    first_new_window_handle = None
+    print("\n--- 階段一: 開啟處置視窗 (智慧濾除多餘視窗版) ---")
     driver.switch_to.window(original_window_handle)
-    # ... (省略舊有邏輯，保持不變) ...
-    main_window_handle = driver.current_window_handle
+    
+    # 1. 點擊第一層 (醫師功能)
+    if not click_specific_link(driver, By.LINK_TEXT, "醫師功能", wait_timeout):
+        print(f"無法點擊 '醫師功能' 連結，跳過。")
+        return "None"
+
+    # 2. 準備點擊第二層 (治療處置功能)
+    # 記錄點擊前的所有視窗 Handles
+    handles_before = driver.window_handles
+    
+# 讓它自然彈出視窗
+    if not click_specific_link(driver, By.LINK_TEXT, "治療處置功能", wait_timeout):
+        print(f"無法點擊 '治療處置功能' 連結，跳過。")
+        return "None"
+        
     try:
-        if not click_specific_link(driver, By.LINK_TEXT, "醫師功能", wait_timeout):
-            print(f"無法點擊 '醫師功能' 連結，跳過。")
-            return "None" 
-        if not click_specific_link(driver, By.LINK_TEXT, "治療處置功能", wait_timeout):
-            print(f"無法點擊 '治療處置功能' 連結，跳過。")
-            return "None"
-            
-        # --- 處理第一個新視窗的開啟和切換 ---
-        print("Waiting for the FIRST new window to open...")
-        WebDriverWait(driver, wait_timeout).until(EC.number_of_windows_to_be(2))
-        print("First new window detected.")
+        print("等待新視窗出現...")
+        # 等待視窗數量增加
+        WebDriverWait(driver, wait_timeout).until(
+            lambda d: len(d.window_handles) > len(handles_before)
+        )
         
-        all_window_handles = driver.window_handles
-        for handle in all_window_handles:
-            if handle != original_window_handle:
-                first_new_window_handle = handle
-                break
+        # 3. 找出所有新跳出的視窗
+        handles_after = driver.window_handles
+        new_windows = [h for h in handles_after if h not in handles_before]
         
-        if not first_new_window_handle:
-            print("Error: Could not find the first new window handle after it opened.")
+        target_window = None
+        
+        if not new_windows:
+            print("錯誤：沒有偵測到新視窗產生。")
             return "None"
 
-        driver.switch_to.window(first_new_window_handle)
-        print(f"Switched to FIRST new window. Title: {driver.title}, URL: {driver.current_url}")
+        print(f"偵測到 {len(new_windows)} 個新視窗，開始內容識別...")
+
+        # --- 【關鍵修改】: 遍歷檢查，而不是盲猜最後一個 ---
+        for win in new_windows:
+            try:
+                driver.switch_to.window(win)
+                time.sleep(0.2) # 給一點點時間讓標題載入
+                title = driver.title
+                url = driver.current_url
+                print(f"  > 檢查視窗 Handle: {win} | Title: {title}")
+
+                # 判斷條件：
+                # 1. 標題包含 '治療' 或 '處置' (最準確)
+                # 2. 或者是 '醫師功能' 的相關頁面
+                # 3. 絕對排除 'about:blank' 或 空標題
+                if ("治療" in title) or ("處置" in title) or ("Order" in title):
+                    print(f"    ✅ 鎖定目標視窗！(符合關鍵字)")
+                    target_window = win
+                    break # 找到了就跳出迴圈
+                
+                # 如果標題是空的，但網址看起來很長(包含 .jsp 或 .aspx)，也可能是目標
+                if title == "" and ("http" in url) and ("about:blank" not in url):
+                     print(f"    ⚠️ 標題為空但網址有效，暫定為候選目標。")
+                     target_window = win # 不 break，繼續看有沒有更好的
+
+            except NoSuchWindowException:
+                continue
+
+        # 如果透過標題找不到，就用「排除法」：
+        # 如果您說順序是反的，那 new_windows[0] 很有可能是正確的
+        if target_window is None:
+            print("⚠️ 無法透過標題識別目標，嘗試使用列表中的第一個視窗 (針對您的情況優化)。")
+            target_window = new_windows[0]
+
+        # 4. 清理多餘視窗
+        # 保留 target_window，關閉 new_windows 裡面的其他視窗
+        for win in new_windows:
+            if win != target_window:
+                try:
+                    driver.switch_to.window(win)
+                    print(f"  ❌ 關閉多餘/廣告視窗: {driver.title}")
+                    driver.close()
+                except:
+                    pass
+        
+        # 5. 最後切換回正確的視窗，準備進行抓取
+        driver.switch_to.window(target_window)
+        print(f"已就緒，當前視窗: {driver.title}")
 
     except (WebDriverException, TimeoutException, Exception) as e:
-        print(f"階段一發生錯誤: {e}")
+        print(f"階段一視窗識別發生錯誤: {e}")
+        # 救援：切回原視窗
         try:
-            if original_window_handle in driver.window_handles:
-                driver.switch_to.window(original_window_handle)
-        except (NoSuchWindowException, InvalidSessionIdException):
-            print("錯誤：原始視窗已關閉或無效，無法切換回去。")
-        except Exception as switch_e:
-            print(f"切換回原始視窗時發生意外錯誤: {switch_e}")
+            driver.switch_to.window(original_window_handle)
+        except:
+            pass
         return "None"
         
     # 點擊篩選連結
     click_specific_link(driver, By.XPATH, "//span[text()='僅顯示生效處置']", wait_timeout)
 
-    time.sleep(1.3 + random.uniform(0,0.1)) # 等待所有查詢結果載入
+    time.sleep(1.3) # 等待所有查詢結果載入
 
     # --- 階段二: 提取數據並處理 ---
     line_str = "None"
@@ -3210,9 +3260,9 @@ def get_foley_lines(driver: webdriver.Edge, original_window_handle: str, wait_ti
         else:
             # 1. 定義和排序要篩選的管路關鍵字 
             raw_target_lines = [
-                '2-Lumen', 'NG Tube', 'Foley', 'CVC', 'Arterial Line', 'A-line', 
-                'PICC', 'Chest Tube', 'T-drain', 'JP Tube', 'NJ Tube',
-                'ECMO', 'IABP', 'Peripherally Inserted Central Catheter', 'Anal Tube'
+                'IV Line', 'Arterial Line', 'CVC(CVP)-Two Lumen', '2-Lumen', 'A-line','NG Tube', 'Foley', 'CVC', 
+                'PICC', 'Endotracheal Tube', 'Chest Tube', 'T-drain', 'JP Tube', 'NJ Tube',
+                'ECMO', 'IABP', 'Peripherally Inserted Central Catheter', 'Anal Tube', 'JP (Jackson-Pratt)'
             ]
             
             # 依字串長度降序排序，確保先匹配最長的/最精確的名稱
@@ -3264,7 +3314,8 @@ def get_foley_lines(driver: webdriver.Edge, original_window_handle: str, wait_ti
             if line_counts:
                 formatted_lines = []
                 # 依管路名稱排序
-                for line in sorted(line_counts.keys()):
+                sorted_lines = sorted(line_counts.keys(), key=lambda x: raw_target_lines.index(x))
+                for line in sorted_lines:
                     count = line_counts[line]
                     if count > 1:
                         formatted_lines.append(f"{line}*{count}")
@@ -3280,7 +3331,12 @@ def get_foley_lines(driver: webdriver.Edge, original_window_handle: str, wait_ti
                     r'Peripherally Inserted Central Catheter': 'PICC',
                     r'Arterial Line': 'A-line',
                     r'JP Tube': 'JP',
-                    r'NG Tube': 'NG'
+                    r'NG Tube': 'NG',
+                    r'Endotracheal Tube': 'ETT',
+                    r'IV Line': 'IV',
+                    r'JP (Jackson-Pratt) Drain': 'JP',
+                    r'CVC(CVP)-Two Lumen Catheter': '2-Lumen',
+                    r'CVC(CVP)-Two Lumen': '2-Lumen',
                 }
 
                 # 使用 re.sub() 進行不區分大小寫替換
@@ -3354,76 +3410,70 @@ def get_foley_lines(driver: webdriver.Edge, original_window_handle: str, wait_ti
                     pass # 跳過後續的 found_diets 邏輯  
 
 
-                else:
-                    # 如果沒有 NPO，才執行原本的飲食/配方尋找邏輯
-                    found_diets = set() 
-                    
-                    # Regex 1: 尋找 (文字 + '飲食'或'配方')。
-                    diet_pattern = re.compile(r'(.*?)(飲食|配方)', re.IGNORECASE)
-                    
-                    # Regex 2: 尋找熱量資訊 (數字 + kcal/Calorie)
-                    kcal_pattern = re.compile(r'熱量：(\d+)\s*k?cal', re.IGNORECASE)
+                
+                # 如果沒有 NPO，才執行原本的飲食/配方尋找邏輯
+                found_diets = set() 
+                
+                # Regex 1: 尋找 (文字 + '飲食'或'配方')。
+                diet_pattern = re.compile(r'(.*?)(飲食|配方|灌食)', re.IGNORECASE)
+                
+                # Regex 2: 尋找熱量資訊 (數字 + kcal/Calorie)
+                kcal_pattern = re.compile(r'熱量：(\d+)\s*k?cal', re.IGNORECASE)
 
-                    for index, row in current_df.iterrows():
-                        alias_text = str(row.get('別名', ''))
+                for index, row in current_df.iterrows():
+                    alias_text = str(row.get('別名', ''))
+                    
+                    if not alias_text or alias_text.lower() == 'nan':
+                        continue
+
+                    # 1. 嘗試匹配 '飲食' 或 '配方' 的名稱
+                    diet_match = diet_pattern.search(alias_text)
+                    
+                    if diet_match:
+                        # 基礎飲食名稱：將 Group 1 (前面的文字) 和 Group 2 (關鍵字) 連接起來
+                        base_diet = (diet_match.group(1).strip() + diet_match.group(2)).strip()
                         
-                        if not alias_text or alias_text.lower() == 'nan':
+                        if not base_diet:
                             continue
-
-                        # 1. 嘗試匹配 '飲食' 或 '配方' 的名稱
-                        diet_match = diet_pattern.search(alias_text)
                         
-                        if diet_match:
-                            # 基礎飲食名稱：將 Group 1 (前面的文字) 和 Group 2 (關鍵字) 連接起來
-                            base_diet = (diet_match.group(1).strip() + diet_match.group(2)).strip()
-                            
-                            if not base_diet:
-                                continue
-                            
+                        # 2. 在整個字串中尋找熱量資訊 (kcal)
+                        
+                        alias_text2 = str(row.get('頻次', ''))
+                        kcal_match = kcal_pattern.search(alias_text2)
 
-                                    
-                            
-                            
-                            # 2. 在整個字串中尋找熱量資訊 (kcal)
-                            
-                            alias_text2 = str(row.get('頻次', ''))
-                            kcal_match = kcal_pattern.search(alias_text2)
+                        if diet_match.group(1).strip() in ('質地調整', '製作處理調整'):
+                            try:
+                                texture_pattern = re.compile(r'質地：(.*?)(?=製作處理|\s|\n|\(|$)')
+                                diet_match = texture_pattern.search(alias_text2)
+                                base_diet = diet_match.group(1).strip() + '飲食'
+                                print(base_diet)
+                            except:
+                                print('no texture data')
 
-                            if diet_match.group(1).strip() in ('質地調整', '製作處理調整'):
-                                try:
-                                    texture_pattern = re.compile(r'質地：(.*?)(?=製作處理|\s|\n|\(|$)')
-                                    diet_match = texture_pattern.search(alias_text2)
-                                    base_diet = diet_match.group(1).strip() + '飲食'
-                                    print(base_diet)
-                                except:
-                                    print('no texture data')
+                        final_diet_name = base_diet
 
-                            final_diet_name = base_diet
-
-                            if kcal_match:
-                                kcal_value = kcal_match.group(1) # 熱量數字
-                                final_diet_name = f"{base_diet}-{kcal_value}"
-                            
-                            # 3. 添加到集合中，確保唯一性
-                            if final_diet_name:
-                                found_diets.add(final_diet_name)
+                        if kcal_match:
+                            kcal_value = kcal_match.group(1) # 熱量數字
+                            final_diet_name = f"{base_diet}-{kcal_value}"
+                        
+                        # 3. 添加到集合中，確保唯一性
+                        if final_diet_name:
+                            found_diets.add(final_diet_name)
                     
 
                     
-                    # 4. 組合最終字串
-                    if found_diets:
-                        diet_str = ', '.join(sorted(found_diets))
-                        print(f"✅ 找到的飲食/配方: {diet_str}")
-                    else:
-                        diet_str = None
-                        print("🔍 未找到任何飲食或配方處置。")
+                # 4. 組合最終字串
+                if found_diets:
+                    diet_str = ', '.join(sorted(found_diets))
+                    print(f"✅ 找到的飲食/配方: {diet_str}")
+              
 
-                    if diet_str:
-                        # 1. 刪除 '肝病' 和 '腎病' (替換為空字串實現刪除)
-                        diet_str = diet_str.replace('肝病', '').replace('腎病', '')
-                        
-                        # 2. 替換 '飲食' 為 '餐'
-                        diet_str = diet_str.replace('飲食', '餐')
+                if diet_str:
+                    # 1. 刪除 '肝病' 和 '腎病' (替換為空字串實現刪除)
+                    diet_str = diet_str.replace('肝病', '').replace('腎病', '')
+                    
+                    # 2. 替換 '飲食' 為 '餐'
+                    diet_str = diet_str.replace('飲食', '餐')
 
             else:
                 print("⚠️ 數據中缺少 '別名' 欄位，跳過飲食/配方提取。")
@@ -3707,21 +3757,23 @@ def main():
                     table_locator=(By.XPATH, "//tbody[./tr/td[contains(text(), '０１．病歷號')]]"), 
                     wait_timeout=WAIT_TIMEOUT)  
 
-                
-                bed_number = get_value_by_key_from_unnamed_df(df,"０２．病房床號：")
-                VS_name = get_value_by_key_from_unnamed_df(df,"１８．主治醫師：")
-                R_name = get_value_by_key_from_unnamed_df(df,"１９．住院醫師：")
-                Age = get_value_by_key_from_unnamed_df(df,"０４．生　日　：")
-                Age = Age.split('（')[1]
-                Age = Age.split('歲')[0]
-                Sex_age = f"{Age} {sex}"
-                VS_number = ''.join(filter(str.isdigit, str(VS_name.split('(')[1].split(')')[0])))
-                VS_name = '(' + VS_name.split('(')[0] + '\n ' + VS_number + ')'
-                R_number = ''.join(filter(str.isdigit, str(R_name.split('(')[1].split(')')[0])))
-                R_name = '(' + R_name.split('(')[0] + '\n ' + R_number + ')'
-                if bed_number is not None:
-                    bed_number = bed_number.replace("－", "-")
-                    bed_number = bed_number.replace(" ", "")
+                try:
+                    bed_number = get_value_by_key_from_unnamed_df(df,"０２．病房床號：")
+                    VS_name = get_value_by_key_from_unnamed_df(df,"１８．主治醫師：")
+                    Age = get_value_by_key_from_unnamed_df(df,"０４．生　日　：")
+                    Age = Age.split('（')[1]
+                    Age = Age.split('歲')[0]
+                    Sex_age = f"{Age} {sex}"
+                    R_name = get_value_by_key_from_unnamed_df(df,"１９．住院醫師：")
+                    VS_number = ''.join(filter(str.isdigit, str(VS_name.split('(')[1].split(')')[0])))
+                    VS_name = '(' + VS_name.split('(')[0] + '\n ' + VS_number + ')'
+                    R_number = ''.join(filter(str.isdigit, str(R_name.split('(')[1].split(')')[0])))
+                    R_name = '(' + R_name.split('(')[0] + '\n ' + R_number + ')'
+                    if bed_number is not None:
+                        bed_number = bed_number.replace("－", "-")
+                        bed_number = bed_number.replace(" ", "")
+                except:
+                    pass
 
                 
 
@@ -4085,9 +4137,13 @@ def main():
 
                     if CMV_new is not None:
                         CMV_list = 'CMV: ' + str(CMV_old) + '>' + str(CMV_new) + ' ' + str(formatted_date) 
+                        if CMV_old == 'None' or CMV_old is None:
+                            CMV_list = 'CMV: ' + str(CMV_new) + ' ' + str(formatted_date)
 
                     if CMV_new == '(-)' or CMV_new == 'low' :
                         CMV_list = 'CMV: ' + str(CMV_new) + ' ' + str(formatted_date)     
+                    
+                    
 
                     print(CMV_list)
                     
